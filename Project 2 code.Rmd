@@ -1,0 +1,118 @@
+---
+title: "SMML II Project II"
+author: "Ujjayini Das"
+date: "`r Sys.Date()`"
+output:
+  word_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(nnet)
+library(devtools)
+library(caret)
+library(neuralnet)
+library(NeuralNetTools)
+library(DataExplorer)
+library(stargazer)
+library(psych)
+```
+
+## Reading the Data
+```{r}
+train <- read.csv("./seeds_train.csv")
+test <- read.csv("./seeds_test.csv")
+```
+## Exploratory Data Analysis
+```{r fig.height=3}
+##summary
+describe(train)[,-c(1,6,7,10,11,12,13)]
+##counts of observations in each variety
+#knitr::kable(table(train$variety), caption = "Counts of Observations in Each Variety",col.names = c("Variety","Frequency")) 
+##exploring the variables
+##plot_intro(train) #no discrete predictor, no missing value
+plot_histogram(train[,-8])
+##plot_qq(train[,-8])
+#exploring bivariate relationships between variables
+##plot_correlation(train)
+```
+
+- From the exploratory data analysis of the training data set, we can see that the data set contains 8 variables among which the outcome variable is `variety` which is categorical in nature, denoting 3 different wheat kernel varieties. All the other variables are real and continuous which we will use as predictors in the process of building a neural network. There is no missing value in any of the variables and each variety contains 50 observations, hence it is a balanced data set (Table in Appendix A).  
+- The histograms indicate that most of the predictors are not normally distributed, although `assymetry` might have a higher chance of being normal. To explore that a bit more, we look at the quantile plots (see Appendix A) for the variables which confirms our deduction from the histograms.
+- The correlation structure (see Appendix A) shows that there are some predictors which have a very high positive (> 0.6) correlation among themselves (for example, `width` with `area`,`perimeter`,`compactness`, `length` and `groove`). On the other hand, there are variables like `assymetry` that has a fairly moderate negative(< -0.3) correlations with `area`, `compactness` and `length`. The negative correlation between `variety`and `area`,`length`,`compactness`,`width`,`perimeter` suggests that the in different varieties of wheat kernel, we can expect to see a downwards trend of change in those variables whereas a positive correlation between `variety` and `groove` suggests that a positive change in grove is expected when we gradually move from variety 1 to variety 3 through variety 2.
+
+## Feature Engineering
+```{r}
+#training set
+#setting indicator to each of the variety for standardization
+variety_train<-as.data.frame(class.ind(as.factor(train$variety)))
+names(variety_train)<-c("variety1","variety2","variety3")
+train.std <- scale(train[,-8])#scaling predictors
+train.std <- cbind(train.std, variety_train)
+#test set
+variety_test<-as.data.frame(class.ind(as.factor(test$variety)))
+names(variety_test)<-c("variety1","variety2","variety3")
+test.std <- scale(test[,-8])
+test.std <- cbind(test.std, variety_test)
+```
+
+```{r include=FALSE}
+#log transformation for `length`, `width`,`perimeter` and `area`
+length <- log(train$length)
+area <- log(train$area)
+width <- log(train$width)
+peri <- log(train$perimeter)
+plot_qq(data.frame(length,area, width, peri))
+```
+
+- As guided by the previous qqplot (Appendix A Fig 2), we tried a few log transformations on predictors and redid the qqplot (Appendix A Fig 4) but it does not make much of a difference. Also, the purpose of this project being building a prediction model, we decide to not focus on the regression alike assumptions. Rather we scale the predictors in order to remove any extra influence because of the differing range of different variables.We perform the scaling for both the training and the test set.
+
+## Hyperparameter Selection 
+
+```{r}
+set.seed(1234)
+#grid search for different sizes and weight decay of the network 
+nnetTunegrid <- expand.grid(.size=seq(1,15,3),.decay = seq(0,1,0.1))
+# 10 fold cross validation
+cv_count<-10
+numFolds <- trainControl(method = "LGOCV",
+                        number = cv_count)
+```
+
+- To select the hyperparameters i.e, size (number of hidden units) and weight decay of the neural network, we implement a grid search method. In this grid, we consider 5 different sizes and 11 different weight decay options. Hence we will search through a total of $5\times 11 = 55$ combinations of hyperparameters to find the best possible option, i.e. the pair of size and weight decay that will give us the best predictive accuracy. In order to do so, we will use a 10-fold cross validation method.
+
+```{r results='hide'}
+#Format the output layer as a factor with levels 1-3
+train_variety<-factor(train$variety,levels=c(1,2,3))
+nnetFit <- train(x = train.std[,c(1:7)], y = train_variety,
+                 method = "nnet",
+                 trControl = numFolds,
+                 tuneGrid = nnetTunegrid,
+                 maxit = 500, 
+                 metric = "Accuracy")
+``` 
+
+```{r}
+ggplot(nnetFit)+ggtitle("Size and Weight Decay for Neural Network")
+#maximum accuracy
+knitr::kable(nnetFit$results[which.max(nnetFit$results$Accuracy),], caption = "Size and Weight Decay at Maximum Accuracy and Kappa")
+#maximum kappa
+# nnetFit$results[which.max(nnetFit$results$Kappa),]
+```
+
+- We can see that 10 fold cross validation gave us a choice of (size,weight decay) as (7,0.1) which gave us the maximum accuracy of 92% and also the maximum value of kappa, almost 88%.
+So, we choose the neural network with 7 hidden units and a weight decay of 0.1 to predict the wheat kernel varieties in test data set. 
+
+## Evaluating Predictions
+```{r}
+test_variety<-as.numeric(predict(nnetFit,test.std[,c(1:7)]))
+cv_xtab<-table(test_variety,test$variety)
+conf_mat <- confusionMatrix(cv_xtab)
+eval_metrics <- cbind(conf_mat$overall[[1]],conf_mat$overall[[2]])
+colnames(eval_metrics)<- c("Accuracy","Kappa")
+knitr::kable(eval_metrics, caption = "Accuracy and Kappa")
+```
+
+- The accuracy of the predictions is $96.67$% $\approx$ $97$% i.e. 97% of the time the fitted neural network is going to predict the variety correctly which is pretty high. Also, from the confusion matrix we can see that only 2 observations are misclassified which resonates with the high predictive accuracy as well.
+- The Cohen's kappa measure being 0.95 says that 95% of the predictions can be made by the model which can't be done by a random guess. This is another way to conclude that the fitted model deos a good job for prediction.
